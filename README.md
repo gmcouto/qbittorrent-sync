@@ -4,7 +4,32 @@ Synchronize torrents from a master qBittorrent instance to one or more child ins
 
 Designed for setups where multiple qBittorrent instances share the same storage (e.g. via NFS/SMB mounts).
 
-## Install
+## Docker
+
+```bash
+docker build -t qbt-sync .
+```
+
+Create a `config.yaml` (see `config.example.yaml`) and run:
+
+```bash
+docker run -d --restart unless-stopped \
+  -v ./config.yaml:/app/config.yaml:ro \
+  --name qbt-sync \
+  qbt-sync
+```
+
+The container runs in daemon mode by default, syncing every N minutes as configured in `daemon_run_interval_minutes`. Dry-run is off so changes are applied immediately.
+
+To do a one-off dry run instead:
+
+```bash
+docker run --rm \
+  -v ./config.yaml:/app/config.yaml:ro \
+  qbt-sync qbt-sync --dry-run
+```
+
+## Install (without Docker)
 
 ```bash
 pip3 install . --break-system-packages
