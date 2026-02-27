@@ -36,6 +36,9 @@ sync:
   # deleted from child instances during sync.
   treat_stopped_as_removed: false
 
+  # When running with --daemon, wait this many minutes between sync cycles.
+  daemon_run_interval_minutes: 15
+
   # Preview changes without applying them. Set to false to actually sync.
   # Can also be overridden with --no-dry-run on the CLI.
   dry_run: true
