@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 
 import qbittorrentapi
@@ -28,6 +29,7 @@ class TorrentEntry:
     category: str
     tags: list[str]
     content_path: str
+    file_priorities: list[int] | None = None
 
 
 @dataclass
@@ -38,10 +40,16 @@ class SyncDiff:
     to_delete: list[TorrentEntry] = field(default_factory=list)
     to_add: list[TorrentEntry] = field(default_factory=list)
     to_relocate: list[tuple[TorrentEntry, TorrentEntry]] = field(default_factory=list)
+    to_sync_files: list[TorrentEntry] = field(default_factory=list)
 
     @property
     def is_empty(self) -> bool:
-        return not self.to_delete and not self.to_add and not self.to_relocate
+        return (
+            not self.to_delete
+            and not self.to_add
+            and not self.to_relocate
+            and not self.to_sync_files
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -101,6 +109,21 @@ def _fetch_master_torrents(
             continue
 
         result[t["hash"]] = _torrent_to_entry(t)
+
+    for h, entry in result.items():
+        try:
+            files = client.torrents_files(torrent_hash=h)
+            entry.file_priorities = [f.priority for f in files]
+        except Exception:
+            log.warning("Failed to fetch file priorities for %s", entry.name)
+
+    deselected_count = sum(
+        1 for e in result.values()
+        if e.file_priorities and any(p == 0 for p in e.file_priorities)
+    )
+    if deselected_count:
+        log.info("%d torrent(s) have deselected files on master", deselected_count)
+
     return result
 
 
@@ -134,6 +157,8 @@ def compute_diff(
     for h in master_hashes & child_hashes:
         if master[h].save_path != child[h].save_path:
             diff.to_relocate.append((master[h], child[h]))
+        if master[h].file_priorities and any(p == 0 for p in master[h].file_priorities):
+            diff.to_sync_files.append(master[h])
 
     return diff
 
@@ -169,6 +194,10 @@ def _apply_adds(
             log.warning("Failed to export .torrent for %s — skipping", entry.name)
             continue
 
+        has_deselected = entry.file_priorities and any(
+            p == 0 for p in entry.file_priorities
+        )
+
         try:
             child_client.torrents_add(
                 torrent_files=torrent_bytes,
@@ -177,13 +206,37 @@ def _apply_adds(
                 tags=entry.tags if entry.tags else None,
                 is_skip_checking=skip_hash_check,
                 use_auto_torrent_management=False,
+                is_paused=has_deselected,
             )
             log.info("Added torrent: %s → %s", entry.name, entry.save_path)
             added += 1
         except qbittorrentapi.Conflict409Error:
             log.debug("Torrent already exists on child: %s", entry.name)
+            continue
         except Exception:
             log.warning("Failed to add torrent %s — skipping", entry.name, exc_info=True)
+            continue
+
+        if has_deselected:
+            deselected_ids = [
+                i for i, p in enumerate(entry.file_priorities) if p == 0
+            ]
+            time.sleep(1)
+            try:
+                child_client.torrents_file_priority(
+                    torrent_hash=entry.hash,
+                    file_ids=deselected_ids,
+                    priority=0,
+                )
+                log.debug(
+                    "Deselected %d file(s) for %s", len(deselected_ids), entry.name
+                )
+            except Exception:
+                log.warning(
+                    "Failed to set file priorities for %s", entry.name, exc_info=True
+                )
+            child_client.torrents_resume(torrent_hashes=entry.hash)
+
     return added
 
 
@@ -210,6 +263,54 @@ def _apply_relocates(
         except Exception:
             log.warning("Failed to relocate torrent %s — skipping", master_entry.name, exc_info=True)
     return relocated
+
+
+def _apply_file_priority_sync(
+    child_client: qbittorrentapi.Client,
+    entries: list[TorrentEntry],
+) -> int:
+    """Deselect files on child that master has deselected."""
+    synced = 0
+    for master_entry in entries:
+        if not master_entry.file_priorities:
+            continue
+
+        try:
+            child_files = child_client.torrents_files(torrent_hash=master_entry.hash)
+        except Exception:
+            log.warning(
+                "Failed to fetch files for %s on child — skipping", master_entry.name
+            )
+            continue
+
+        ids_to_deselect = [
+            i
+            for i, mp in enumerate(master_entry.file_priorities)
+            if mp == 0 and i < len(child_files) and child_files[i].priority != 0
+        ]
+
+        if not ids_to_deselect:
+            continue
+
+        try:
+            child_client.torrents_file_priority(
+                torrent_hash=master_entry.hash,
+                file_ids=ids_to_deselect,
+                priority=0,
+            )
+            log.info(
+                "Deselected %d file(s) for %s",
+                len(ids_to_deselect),
+                master_entry.name,
+            )
+            synced += 1
+        except Exception:
+            log.warning(
+                "Failed to update file priorities for %s — skipping",
+                master_entry.name,
+                exc_info=True,
+            )
+    return synced
 
 
 # ---------------------------------------------------------------------------
@@ -244,6 +345,12 @@ def _print_diff_table(diff: SyncDiff, console: Console, dry_run: bool) -> None:
         if len(diff.to_relocate) > 10:
             details.append(f"… and {len(diff.to_relocate) - 10} more")
         table.add_row("[yellow]Relocate[/]", str(len(diff.to_relocate)), "\n".join(details))
+
+    if diff.to_sync_files:
+        names = "\n".join(e.name for e in diff.to_sync_files[:10])
+        if len(diff.to_sync_files) > 10:
+            names += f"\n… and {len(diff.to_sync_files) - 10} more"
+        table.add_row("[magenta]File selection[/]", str(len(diff.to_sync_files)), names)
 
     if diff.is_empty:
         table.add_row("[dim]—[/]", "0", "Already in sync")
@@ -291,7 +398,9 @@ def run_sync(cfg: AppConfig, *, dry_run: bool, console: Console) -> None:
         deleted = _apply_deletes(child_client, diff.to_delete)
         added = _apply_adds(master_client, child_client, diff.to_add, cfg.sync.skip_hash_check)
         relocated = _apply_relocates(child_client, diff.to_relocate)
+        file_synced = _apply_file_priority_sync(child_client, diff.to_sync_files)
 
         console.print(
-            f"\n  [bold green]Done:[/] {deleted} deleted, {added} added, {relocated} relocated.\n"
+            f"\n  [bold green]Done:[/] {deleted} deleted, {added} added,"
+            f" {relocated} relocated, {file_synced} file-selection synced.\n"
         )
