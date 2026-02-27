@@ -29,6 +29,7 @@ class TorrentEntry:
     category: str
     tags: list[str]
     content_path: str
+    download_path: str = ""
     file_priorities: list[int] | None = None
 
 
@@ -77,6 +78,7 @@ def _torrent_to_entry(t: qbittorrentapi.TorrentDictionary) -> TorrentEntry:
         category=t.get("category", ""),
         tags=tags,
         content_path=t.get("content_path", ""),
+        download_path=t.get("download_path", ""),
     )
 
 
@@ -198,17 +200,27 @@ def _apply_adds(
             p == 0 for p in entry.file_priorities
         )
 
+        add_kwargs: dict = dict(
+            torrent_files=torrent_bytes,
+            save_path=entry.save_path,
+            category=entry.category,
+            tags=entry.tags if entry.tags else None,
+            is_skip_checking=skip_hash_check,
+            use_auto_torrent_management=False,
+            is_paused=has_deselected,
+        )
+        if entry.download_path:
+            add_kwargs["download_path"] = entry.download_path
+
         try:
-            child_client.torrents_add(
-                torrent_files=torrent_bytes,
-                save_path=entry.save_path,
-                category=entry.category,
-                tags=entry.tags if entry.tags else None,
-                is_skip_checking=skip_hash_check,
-                use_auto_torrent_management=False,
-                is_paused=has_deselected,
-            )
-            log.info("Added torrent: %s → %s", entry.name, entry.save_path)
+            child_client.torrents_add(**add_kwargs)
+            if entry.download_path:
+                log.info(
+                    "Added torrent: %s → %s (temp: %s)",
+                    entry.name, entry.save_path, entry.download_path,
+                )
+            else:
+                log.info("Added torrent: %s → %s", entry.name, entry.save_path)
             added += 1
         except qbittorrentapi.Conflict409Error:
             log.debug("Torrent already exists on child: %s", entry.name)
