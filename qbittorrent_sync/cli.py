@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import sys
+import time
+from datetime import datetime, timedelta
 
 import click
 from rich.console import Console
@@ -47,7 +49,13 @@ def _setup_logging(verbose: bool) -> None:
     default=False,
     help="Enable verbose (debug) logging.",
 )
-def main(config_path: str, dry_run: bool, verbose: bool) -> None:
+@click.option(
+    "--daemon",
+    is_flag=True,
+    default=False,
+    help="Keep running, repeating the sync every N minutes (see daemon_run_interval_minutes).",
+)
+def main(config_path: str, dry_run: bool, verbose: bool, daemon: bool) -> None:
     """Synchronize torrents from a master qBittorrent instance to children."""
     _setup_logging(verbose)
     log = logging.getLogger("qbt-sync")
@@ -62,10 +70,38 @@ def main(config_path: str, dry_run: bool, verbose: bool) -> None:
     log.debug("Loaded config: master=%s, children=%d, dry_run=%s", cfg.master.host, len(cfg.children), dry_run)
 
     try:
-        run_sync(cfg, dry_run=dry_run, console=console)
+        if daemon:
+            _run_daemon(cfg, dry_run=dry_run, log=log)
+        else:
+            run_sync(cfg, dry_run=dry_run, console=console)
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted.[/]")
         sys.exit(130)
     except Exception:
         log.exception("Unexpected error during sync")
         sys.exit(1)
+
+
+def _run_daemon(cfg, *, dry_run: bool, log: logging.Logger) -> None:
+    interval = cfg.sync.daemon_run_interval_minutes
+    console.print(f"\n[bold]Daemon mode:[/] syncing every [cyan]{interval}[/] minute(s). Press Ctrl+C to stop.\n")
+
+    while True:
+        start = time.monotonic()
+        console.rule(f"[bold]Sync started at {datetime.now():%Y-%m-%d %H:%M:%S}[/]")
+
+        try:
+            run_sync(cfg, dry_run=dry_run, console=console)
+        except KeyboardInterrupt:
+            raise
+        except Exception:
+            log.exception("Sync failed — will retry next cycle")
+
+        elapsed = time.monotonic() - start
+        next_run = datetime.now() + timedelta(minutes=interval)
+        console.print(
+            f"\n[dim]Sync completed in {elapsed:.1f}s. "
+            f"Next run at {next_run:%H:%M:%S} ({interval}m interval).[/]\n"
+        )
+
+        time.sleep(interval * 60)

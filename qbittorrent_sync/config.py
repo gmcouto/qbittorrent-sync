@@ -27,6 +27,7 @@ class SyncConfig:
     dry_run: bool = True
     sync_file_selections: bool = False
     treat_stopped_as_removed: bool = False
+    daemon_run_interval_minutes: int = 15
 
 
 @dataclass
@@ -84,6 +85,7 @@ def load_config(path: str | Path) -> AppConfig:
         dry_run=bool(sync_raw.get("dry_run", True)),
         sync_file_selections=bool(sync_raw.get("sync_file_selections", False)),
         treat_stopped_as_removed=bool(sync_raw.get("treat_stopped_as_removed", False)),
+        daemon_run_interval_minutes=int(sync_raw.get("daemon_run_interval_minutes", 15)),
     )
 
     return AppConfig(master=master, children=children, sync=sync)
