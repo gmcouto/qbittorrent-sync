@@ -26,6 +26,11 @@ sync:
   # Safe when children mount the same storage as master.
   skip_hash_check: true
 
+  # Sync deselected files from master to existing child torrents.
+  # When disabled, file selections are still applied to newly added torrents,
+  # but the expensive bulk load of all master file priorities is skipped.
+  sync_file_selections: false
+
   # Preview changes without applying them. Set to false to actually sync.
   # Can also be overridden with --no-dry-run on the CLI.
   dry_run: true

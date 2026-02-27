@@ -83,6 +83,8 @@ def _torrent_to_entry(t: qbittorrentapi.TorrentDictionary) -> TorrentEntry:
 def _fetch_master_torrents(
     client: qbittorrentapi.Client,
     min_seeding_seconds: int,
+    *,
+    load_file_priorities: bool = True,
 ) -> dict[str, TorrentEntry]:
     """Return eligible master torrents keyed by info-hash."""
     torrents = client.torrents_info()
@@ -110,19 +112,20 @@ def _fetch_master_torrents(
 
         result[t["hash"]] = _torrent_to_entry(t)
 
-    for h, entry in result.items():
-        try:
-            files = client.torrents_files(torrent_hash=h)
-            entry.file_priorities = [f.priority for f in files]
-        except Exception:
-            log.warning("Failed to fetch file priorities for %s", entry.name)
+    if load_file_priorities:
+        for h, entry in result.items():
+            try:
+                files = client.torrents_files(torrent_hash=h)
+                entry.file_priorities = [f.priority for f in files]
+            except Exception:
+                log.warning("Failed to fetch file priorities for %s", entry.name)
 
-    deselected_count = sum(
-        1 for e in result.values()
-        if e.file_priorities and any(p == 0 for p in e.file_priorities)
-    )
-    if deselected_count:
-        log.info("%d torrent(s) have deselected files on master", deselected_count)
+        deselected_count = sum(
+            1 for e in result.values()
+            if e.file_priorities and any(p == 0 for p in e.file_priorities)
+        )
+        if deselected_count:
+            log.info("%d torrent(s) have deselected files on master", deselected_count)
 
     return result
 
@@ -197,6 +200,13 @@ def _apply_adds(
         except Exception:
             log.warning("Failed to export .torrent for %s — skipping", entry.name)
             continue
+
+        if entry.file_priorities is None:
+            try:
+                files = master_client.torrents_files(torrent_hash=entry.hash)
+                entry.file_priorities = [f.priority for f in files]
+            except Exception:
+                log.warning("Failed to fetch file priorities for %s", entry.name)
 
         has_deselected = entry.file_priorities and any(
             p == 0 for p in entry.file_priorities
@@ -534,8 +544,14 @@ def run_sync(cfg: AppConfig, *, dry_run: bool, console: Console) -> None:
         log.exception("Cannot connect to master at %s", cfg.master.host)
         raise
 
-    master_torrents = _fetch_master_torrents(master_client, min_seed_secs)
-    console.print(f"  Found [bold]{len(master_torrents)}[/] eligible torrent(s) on master.\n")
+    sync_files = cfg.sync.sync_file_selections
+    master_torrents = _fetch_master_torrents(
+        master_client, min_seed_secs, load_file_priorities=sync_files,
+    )
+    console.print(f"  Found [bold]{len(master_torrents)}[/] eligible torrent(s) on master.")
+    if not sync_files:
+        console.print("  [dim]File-selection sync is disabled; skipping bulk file-priority load.[/]")
+    console.print()
 
     # --- children ---
     for child_cfg in cfg.children:
@@ -550,7 +566,8 @@ def run_sync(cfg: AppConfig, *, dry_run: bool, console: Console) -> None:
         log.debug("Child %s has %d torrent(s)", child_cfg.name, len(child_torrents))
 
         diff = compute_diff(master_torrents, child_torrents, child_cfg.name)
-        diff.to_sync_files = _filter_needed_file_syncs(child_client, diff.to_sync_files)
+        if sync_files:
+            diff.to_sync_files = _filter_needed_file_syncs(child_client, diff.to_sync_files)
         _print_diff_table(diff, console, dry_run)
 
         if dry_run or diff.is_empty:
@@ -560,7 +577,7 @@ def run_sync(cfg: AppConfig, *, dry_run: bool, console: Console) -> None:
         added = _apply_adds(master_client, child_client, diff.to_add, cfg.sync.skip_hash_check)
         recategorized = _apply_recategorize(child_client, diff.to_recategorize)
         relocated = _apply_relocates(child_client, diff.to_relocate)
-        file_synced = _apply_file_priority_sync(child_client, diff.to_sync_files)
+        file_synced = _apply_file_priority_sync(child_client, diff.to_sync_files) if sync_files else 0
 
         console.print(
             f"\n  [bold green]Done:[/] {deleted} deleted, {added} added,"
