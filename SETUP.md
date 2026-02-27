@@ -50,3 +50,24 @@ docker run --rm \
   -v ./config.yaml:/app/config.yaml:ro \
   qbt-sync qbt-sync --dry-run
 ```
+
+## Cross-platform build (arm64 -> amd64)
+
+If you're on an Apple Silicon Mac (arm64) and need to build for an amd64 server:
+
+```bash
+docker buildx build --platform linux/amd64 -t gmcouto/qbt-sync:latest --load .
+```
+
+To build and push in one step:
+
+```bash
+docker buildx build --platform linux/amd64 -t gmcouto/qbt-sync:latest --push .
+```
+
+If `buildx` isn't available, create the builder first:
+
+```bash
+docker buildx create --name mybuilder --use
+docker buildx inspect --bootstrap
+```
