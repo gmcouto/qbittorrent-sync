@@ -29,6 +29,9 @@ sync:
   # Sync deselected files from master to existing child torrents.
   # When disabled, file selections are still applied to newly added torrents,
   # but the expensive bulk load of all master file priorities is skipped.
+  # WARNING: Enabling this requires fetching file priorities for every torrent
+  # individually, which can make each sync cycle take many minutes when you
+  # have thousands of torrents.
   sync_file_selections: false
 
   # Treat paused/stopped torrents on master as if they were removed.

@@ -5,13 +5,14 @@ from __future__ import annotations
 import logging
 import sys
 import time
+from dataclasses import asdict
 from datetime import datetime, timedelta
 
 import click
 from rich.console import Console
 from rich.logging import RichHandler
 
-from qbittorrent_sync.config import ConfigError, load_config
+from qbittorrent_sync.config import ConfigError, SyncConfig, load_config
 from qbittorrent_sync.sync import run_sync
 
 console = Console()
@@ -66,14 +67,14 @@ def main(config_path: str, dry_run: bool, verbose: bool, daemon: bool) -> None:
         console.print(f"[bold red]Configuration error:[/] {exc}")
         sys.exit(1)
 
-    dry_run = cfg.sync.dry_run if dry_run is None else dry_run
-    log.debug("Loaded config: master=%s, children=%d, dry_run=%s", cfg.master.host, len(cfg.children), dry_run)
+    effective_dry_run = cfg.sync.dry_run if dry_run is None else dry_run
+    log.debug("Loaded config: master=%s, children=%d, dry_run=%s", cfg.master.host, len(cfg.children), effective_dry_run)
 
     try:
         if daemon:
-            _run_daemon(cfg, dry_run=dry_run, log=log)
+            _run_daemon(config_path, dry_run_override=dry_run, log=log)
         else:
-            run_sync(cfg, dry_run=dry_run, console=console)
+            run_sync(cfg, dry_run=effective_dry_run, console=console)
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted.[/]")
         sys.exit(130)
@@ -82,11 +83,25 @@ def main(config_path: str, dry_run: bool, verbose: bool, daemon: bool) -> None:
         sys.exit(1)
 
 
-def _run_daemon(cfg, *, dry_run: bool, log: logging.Logger) -> None:
-    interval = cfg.sync.daemon_run_interval_minutes
-    console.print(f"\n[bold]Daemon mode:[/] syncing every [cyan]{interval}[/] minute(s). Press Ctrl+C to stop.\n")
+def _run_daemon(config_path: str, *, dry_run_override: bool | None, log: logging.Logger) -> None:
+    console.print("\n[bold]Daemon mode:[/] Press Ctrl+C to stop.\n")
+    prev_sync: SyncConfig | None = None
 
     while True:
+        try:
+            cfg = load_config(config_path)
+        except ConfigError as exc:
+            log.error("Failed to reload config: %s — will retry next cycle", exc)
+            time.sleep(60)
+            continue
+
+        if prev_sync is not None:
+            _log_sync_changes(prev_sync, cfg.sync, log)
+        prev_sync = cfg.sync
+
+        dry_run = cfg.sync.dry_run if dry_run_override is None else dry_run_override
+        interval = cfg.sync.daemon_run_interval_minutes
+
         start = time.monotonic()
         console.rule(f"[bold]Sync started at {datetime.now():%Y-%m-%d %H:%M:%S}[/]")
 
@@ -105,3 +120,14 @@ def _run_daemon(cfg, *, dry_run: bool, log: logging.Logger) -> None:
         )
 
         time.sleep(interval * 60)
+
+
+def _log_sync_changes(old: SyncConfig, new: SyncConfig, log: logging.Logger) -> None:
+    old_d, new_d = asdict(old), asdict(new)
+    changes = {k: (old_d[k], new_d[k]) for k in old_d if old_d[k] != new_d[k]}
+    if changes:
+        log.info("Config reloaded — sync options changed:")
+        for key, (prev, curr) in changes.items():
+            log.info("  %s: %s → %s", key, prev, curr)
+    else:
+        log.debug("Config reloaded — no sync option changes.")
