@@ -27,7 +27,6 @@ class TorrentEntry:
     name: str
     save_path: str
     category: str
-    tags: list[str]
     content_path: str
     download_path: str = ""
     file_priorities: list[int] | None = None
@@ -40,6 +39,7 @@ class SyncDiff:
     child_name: str
     to_delete: list[TorrentEntry] = field(default_factory=list)
     to_add: list[TorrentEntry] = field(default_factory=list)
+    to_recategorize: list[tuple[TorrentEntry, TorrentEntry]] = field(default_factory=list)
     to_relocate: list[tuple[TorrentEntry, TorrentEntry]] = field(default_factory=list)
     to_sync_files: list[TorrentEntry] = field(default_factory=list)
 
@@ -48,6 +48,7 @@ class SyncDiff:
         return (
             not self.to_delete
             and not self.to_add
+            and not self.to_recategorize
             and not self.to_relocate
             and not self.to_sync_files
         )
@@ -69,14 +70,11 @@ def _connect(instance: InstanceConfig) -> qbittorrentapi.Client:
 
 
 def _torrent_to_entry(t: qbittorrentapi.TorrentDictionary) -> TorrentEntry:
-    raw_tags = t.get("tags", "") or ""
-    tags = [tag.strip() for tag in raw_tags.split(",") if tag.strip()] if raw_tags else []
     return TorrentEntry(
         hash=t["hash"],
         name=t.get("name", ""),
         save_path=t.get("save_path", ""),
         category=t.get("category", ""),
-        tags=tags,
         content_path=t.get("content_path", ""),
         download_path=t.get("download_path", ""),
     )
@@ -157,7 +155,11 @@ def compute_diff(
         diff.to_add.append(master[h])
 
     for h in master_hashes & child_hashes:
-        if master[h].save_path != child[h].save_path:
+        if master[h].category != child[h].category:
+            diff.to_recategorize.append((master[h], child[h]))
+        save_differs = master[h].save_path != child[h].save_path
+        dl_differs = master[h].download_path != child[h].download_path
+        if save_differs or dl_differs:
             diff.to_relocate.append((master[h], child[h]))
         if master[h].file_priorities and any(p == 0 for p in master[h].file_priorities):
             diff.to_sync_files.append(master[h])
@@ -204,7 +206,6 @@ def _apply_adds(
             torrent_files=torrent_bytes,
             save_path=entry.save_path,
             category=entry.category,
-            tags=entry.tags if entry.tags else None,
             is_skip_checking=skip_hash_check,
             use_auto_torrent_management=False,
             is_paused=has_deselected,
@@ -252,25 +253,63 @@ def _apply_adds(
     return added
 
 
+def _apply_recategorize(
+    child_client: qbittorrentapi.Client,
+    entries: list[tuple[TorrentEntry, TorrentEntry]],
+) -> int:
+    recategorized = 0
+    for master_entry, child_entry in entries:
+        try:
+            child_client.torrents_set_category(
+                category=master_entry.category,
+                torrent_hashes=master_entry.hash,
+            )
+            log.info(
+                "Recategorized torrent: %s (%r → %r)",
+                master_entry.name,
+                child_entry.category,
+                master_entry.category,
+            )
+            recategorized += 1
+        except Exception:
+            log.warning(
+                "Failed to recategorize torrent %s — skipping",
+                master_entry.name,
+                exc_info=True,
+            )
+    return recategorized
+
+
 def _apply_relocates(
     child_client: qbittorrentapi.Client,
     entries: list[tuple[TorrentEntry, TorrentEntry]],
 ) -> int:
     relocated = 0
-    for master_entry, _child_entry in entries:
+    for master_entry, child_entry in entries:
         h = master_entry.hash
         try:
             child_client.torrents_pause(torrent_hashes=h)
-            child_client.torrents_set_save_path(
-                save_path=master_entry.save_path,
-                torrent_hashes=h,
-            )
+
+            if master_entry.save_path != child_entry.save_path:
+                child_client.torrents_set_save_path(
+                    save_path=master_entry.save_path,
+                    torrent_hashes=h,
+                )
+
+            if master_entry.download_path != child_entry.download_path:
+                child_client.torrents_set_download_path(
+                    download_path=master_entry.download_path,
+                    torrent_hashes=h,
+                )
+
             child_client.torrents_resume(torrent_hashes=h)
-            log.info(
-                "Relocated torrent: %s → %s",
-                master_entry.name,
-                master_entry.save_path,
-            )
+
+            parts = []
+            if master_entry.save_path != child_entry.save_path:
+                parts.append(f"save_path: {child_entry.save_path} → {master_entry.save_path}")
+            if master_entry.download_path != child_entry.download_path:
+                parts.append(f"temp_path: {child_entry.download_path!r} → {master_entry.download_path!r}")
+            log.info("Relocated torrent: %s (%s)", master_entry.name, "; ".join(parts))
             relocated += 1
         except Exception:
             log.warning("Failed to relocate torrent %s — skipping", master_entry.name, exc_info=True)
@@ -373,10 +412,23 @@ def _print_diff_table(diff: SyncDiff, console: Console, dry_run: bool) -> None:
             names += f"\n… and {len(diff.to_add) - 10} more"
         table.add_row("[green]Add[/]", str(len(diff.to_add)), names)
 
-    if diff.to_relocate:
+    if diff.to_recategorize:
         details: list[str] = []
+        for master_e, child_e in diff.to_recategorize[:10]:
+            details.append(f"{master_e.name}: {child_e.category!r} → {master_e.category!r}")
+        if len(diff.to_recategorize) > 10:
+            details.append(f"… and {len(diff.to_recategorize) - 10} more")
+        table.add_row("[cyan]Recategorize[/]", str(len(diff.to_recategorize)), "\n".join(details))
+
+    if diff.to_relocate:
+        details = []
         for master_e, child_e in diff.to_relocate[:10]:
-            details.append(f"{master_e.name}: {child_e.save_path} → {master_e.save_path}")
+            parts: list[str] = []
+            if master_e.save_path != child_e.save_path:
+                parts.append(f"{child_e.save_path} → {master_e.save_path}")
+            if master_e.download_path != child_e.download_path:
+                parts.append(f"temp: {child_e.download_path or '(none)'} → {master_e.download_path or '(none)'}")
+            details.append(f"{master_e.name}: {'; '.join(parts)}")
         if len(diff.to_relocate) > 10:
             details.append(f"… and {len(diff.to_relocate) - 10} more")
         table.add_row("[yellow]Relocate[/]", str(len(diff.to_relocate)), "\n".join(details))
@@ -506,10 +558,12 @@ def run_sync(cfg: AppConfig, *, dry_run: bool, console: Console) -> None:
 
         deleted = _apply_deletes(child_client, diff.to_delete)
         added = _apply_adds(master_client, child_client, diff.to_add, cfg.sync.skip_hash_check)
+        recategorized = _apply_recategorize(child_client, diff.to_recategorize)
         relocated = _apply_relocates(child_client, diff.to_relocate)
         file_synced = _apply_file_priority_sync(child_client, diff.to_sync_files)
 
         console.print(
             f"\n  [bold green]Done:[/] {deleted} deleted, {added} added,"
-            f" {relocated} relocated, {file_synced} file-selection synced.\n"
+            f" {recategorized} recategorized, {relocated} relocated,"
+            f" {file_synced} file-selection synced.\n"
         )
