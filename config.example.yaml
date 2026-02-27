@@ -31,6 +31,11 @@ sync:
   # but the expensive bulk load of all master file priorities is skipped.
   sync_file_selections: false
 
+  # Treat paused/stopped torrents on master as if they were removed.
+  # When enabled, any torrent that is paused or stopped on master will be
+  # deleted from child instances during sync.
+  treat_stopped_as_removed: false
+
   # Preview changes without applying them. Set to false to actually sync.
   # Can also be overridden with --no-dry-run on the CLI.
   dry_run: true

@@ -80,17 +80,28 @@ def _torrent_to_entry(t: qbittorrentapi.TorrentDictionary) -> TorrentEntry:
     )
 
 
+_PAUSED_STATES = {"pausedup", "pauseddl"}
+
+
 def _fetch_master_torrents(
     client: qbittorrentapi.Client,
     min_seeding_seconds: int,
     *,
     load_file_priorities: bool = True,
+    treat_stopped_as_removed: bool = False,
 ) -> dict[str, TorrentEntry]:
     """Return eligible master torrents keyed by info-hash."""
     torrents = client.torrents_info()
     result: dict[str, TorrentEntry] = {}
+    stopped_count = 0
     for t in torrents:
         state = (t.get("state") or "").lower()
+
+        if treat_stopped_as_removed and state in _PAUSED_STATES:
+            stopped_count += 1
+            log.debug("Treating stopped torrent as removed: %s", t.get("name", t["hash"]))
+            continue
+
         is_completed = state in {
             "uploading", "stalledup", "forcedup",
             "pausedup", "queuedup", "checkingup",
@@ -111,6 +122,9 @@ def _fetch_master_torrents(
             continue
 
         result[t["hash"]] = _torrent_to_entry(t)
+
+    if treat_stopped_as_removed and stopped_count:
+        log.info("Excluded %d stopped/paused torrent(s) from master (treated as removed)", stopped_count)
 
     if load_file_priorities:
         for h, entry in result.items():
@@ -545,10 +559,15 @@ def run_sync(cfg: AppConfig, *, dry_run: bool, console: Console) -> None:
         raise
 
     sync_files = cfg.sync.sync_file_selections
+    treat_stopped = cfg.sync.treat_stopped_as_removed
     master_torrents = _fetch_master_torrents(
-        master_client, min_seed_secs, load_file_priorities=sync_files,
+        master_client, min_seed_secs,
+        load_file_priorities=sync_files,
+        treat_stopped_as_removed=treat_stopped,
     )
     console.print(f"  Found [bold]{len(master_torrents)}[/] eligible torrent(s) on master.")
+    if treat_stopped:
+        console.print("  [dim]Stopped/paused torrents on master are treated as removed.[/]")
     if not sync_files:
         console.print("  [dim]File-selection sync is disabled; skipping bulk file-priority load.[/]")
     console.print()
