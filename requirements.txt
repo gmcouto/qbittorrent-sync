@@ -1,0 +1,4 @@
+qbittorrent-api
+click
+pyyaml
+rich

@@ -1,0 +1,27 @@
+# qbt-sync configuration
+# Copy this file to config.yaml and adjust the values.
+
+master:
+  host: "http://192.168.1.10:8080"
+  username: admin
+  password: adminadmin
+
+children:
+  - name: child1
+    host: "http://192.168.1.11:8080"
+    username: admin
+    password: adminadmin
+
+  # Add more children as needed:
+  # - name: child2
+  #   host: "http://192.168.1.12:8080"
+  #   username: admin
+  #   password: adminadmin
+
+sync:
+  # Only sync torrents that have been seeding for at least this many minutes.
+  min_seeding_time_minutes: 10
+
+  # Skip hash verification when adding torrents to children.
+  # Safe when children mount the same storage as master.
+  skip_hash_check: true

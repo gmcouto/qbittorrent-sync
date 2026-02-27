@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qbittorrent-sync"
+version = "0.1.0"
+description = "Synchronize torrents from a master qBittorrent instance to children instances"
+requires-python = ">=3.10"
+dependencies = [
+    "qbittorrent-api",
+    "click",
+    "pyyaml",
+    "rich",
+]
+
+[project.scripts]
+qbt-sync = "qbittorrent_sync.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["qbittorrent_sync*"]
