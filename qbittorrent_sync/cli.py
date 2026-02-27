@@ -36,10 +36,9 @@ def _setup_logging(verbose: bool) -> None:
     show_default=True,
 )
 @click.option(
-    "--dry-run",
-    is_flag=True,
-    default=False,
-    help="Show what would be done without making changes.",
+    "--dry-run/--no-dry-run",
+    default=None,
+    help="Preview changes without applying (default: true). Use --no-dry-run to apply.",
 )
 @click.option(
     "-v",
@@ -59,7 +58,8 @@ def main(config_path: str, dry_run: bool, verbose: bool) -> None:
         console.print(f"[bold red]Configuration error:[/] {exc}")
         sys.exit(1)
 
-    log.debug("Loaded config: master=%s, children=%d", cfg.master.host, len(cfg.children))
+    dry_run = cfg.sync.dry_run if dry_run is None else dry_run
+    log.debug("Loaded config: master=%s, children=%d, dry_run=%s", cfg.master.host, len(cfg.children), dry_run)
 
     try:
         run_sync(cfg, dry_run=dry_run, console=console)

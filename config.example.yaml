@@ -25,3 +25,7 @@ sync:
   # Skip hash verification when adding torrents to children.
   # Safe when children mount the same storage as master.
   skip_hash_check: true
+
+  # Preview changes without applying them. Set to false to actually sync.
+  # Can also be overridden with --no-dry-run on the CLI.
+  dry_run: true

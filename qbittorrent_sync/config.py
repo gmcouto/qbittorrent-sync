@@ -24,6 +24,7 @@ class SyncConfig:
 
     min_seeding_time_minutes: int = 10
     skip_hash_check: bool = True
+    dry_run: bool = True
 
 
 @dataclass
@@ -78,6 +79,7 @@ def load_config(path: str | Path) -> AppConfig:
     sync = SyncConfig(
         min_seeding_time_minutes=int(sync_raw.get("min_seeding_time_minutes", 10)),
         skip_hash_check=bool(sync_raw.get("skip_hash_check", True)),
+        dry_run=bool(sync_raw.get("dry_run", True)),
     )
 
     return AppConfig(master=master, children=children, sync=sync)
