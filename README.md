@@ -4,11 +4,7 @@ Synchronize torrents from a master qBittorrent instance to one or more child ins
 
 Designed for setups where multiple qBittorrent instances share the same storage (e.g. via NFS/SMB mounts).
 
-## Docker
-
-```bash
-docker build -t qbt-sync .
-```
+## Install
 
 Create a `config.yaml` (see `config.example.yaml`) and run:
 
@@ -16,50 +12,10 @@ Create a `config.yaml` (see `config.example.yaml`) and run:
 docker run -d --restart unless-stopped \
   -v ./config.yaml:/app/config.yaml:ro \
   --name qbt-sync \
-  qbt-sync
+  gmcouto/qbt-sync:latest
 ```
 
-The container runs in daemon mode by default, syncing every N minutes as configured in `daemon_run_interval_minutes`. Dry-run is off so changes are applied immediately.
-
-To do a one-off dry run instead:
-
-```bash
-docker run --rm \
-  -v ./config.yaml:/app/config.yaml:ro \
-  qbt-sync qbt-sync --dry-run
-```
-
-## Install (without Docker)
-
-```bash
-pip3 install . --break-system-packages
-```
-
-## Configuration
-
-Copy the example config and edit it:
-
-```bash
-cp config.example.yaml config.yaml
-```
-
-See `config.example.yaml` for all available options.
-
-## Usage
-
-```bash
-# Preview changes (dry run, the default)
-qbt-sync
-
-# Apply changes
-qbt-sync --no-dry-run
-
-# Custom config path
-qbt-sync -c /path/to/config.yaml
-
-# Verbose output
-qbt-sync -v
-```
+The container runs in daemon mode by default, syncing every N minutes as configured in `daemon_run_interval_minutes`.
 
 ## What it does
 
