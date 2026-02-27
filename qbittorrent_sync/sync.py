@@ -277,6 +277,29 @@ def _apply_relocates(
     return relocated
 
 
+def _filter_needed_file_syncs(
+    child_client: qbittorrentapi.Client,
+    entries: list[TorrentEntry],
+) -> list[TorrentEntry]:
+    """Keep only entries where the child's file priorities actually differ from master."""
+    needed: list[TorrentEntry] = []
+    for master_entry in entries:
+        if not master_entry.file_priorities:
+            continue
+        try:
+            child_files = child_client.torrents_files(torrent_hash=master_entry.hash)
+        except Exception:
+            needed.append(master_entry)
+            continue
+        has_diff = any(
+            mp == 0 and i < len(child_files) and child_files[i].priority != 0
+            for i, mp in enumerate(master_entry.file_priorities)
+        )
+        if has_diff:
+            needed.append(master_entry)
+    return needed
+
+
 def _apply_file_priority_sync(
     child_client: qbittorrentapi.Client,
     entries: list[TorrentEntry],
@@ -475,6 +498,7 @@ def run_sync(cfg: AppConfig, *, dry_run: bool, console: Console) -> None:
         log.debug("Child %s has %d torrent(s)", child_cfg.name, len(child_torrents))
 
         diff = compute_diff(master_torrents, child_torrents, child_cfg.name)
+        diff.to_sync_files = _filter_needed_file_syncs(child_client, diff.to_sync_files)
         _print_diff_table(diff, console, dry_run)
 
         if dry_run or diff.is_empty:
