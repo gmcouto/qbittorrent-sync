@@ -371,12 +371,85 @@ def _print_diff_table(diff: SyncDiff, console: Console, dry_run: bool) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Pre-sync cleanup
+# ---------------------------------------------------------------------------
+
+_STALE_STATES = {"error", "missingfiles"}
+
+
+def _cleanup_stale_torrents(
+    client: qbittorrentapi.Client,
+    child_name: str,
+    console: Console,
+    dry_run: bool,
+) -> int:
+    """Remove errored or 0-progress torrents from a child before sync."""
+    torrents = client.torrents_info()
+    to_remove: list[tuple[str, str, str]] = []
+
+    for t in torrents:
+        state = (t.get("state") or "").lower()
+        name = t.get("name", t["hash"])
+
+        if state in _STALE_STATES:
+            to_remove.append((t["hash"], name, f"state={state}"))
+            continue
+
+        progress = t.get("progress", 0) or 0
+        if progress <= 0:
+            to_remove.append((t["hash"], name, "0% progress"))
+
+    if not to_remove:
+        console.print("  No stale torrents found.")
+        return 0
+
+    table = Table(
+        title=f"Stale torrents on [bold cyan]{child_name}[/]",
+        show_lines=False,
+    )
+    table.add_column("Torrent", style="white")
+    table.add_column("Reason", style="yellow")
+    for _, name, reason in to_remove:
+        table.add_row(name, reason)
+    console.print(table)
+
+    if dry_run:
+        console.print(
+            f"  [bold yellow][DRY RUN][/] Would remove {len(to_remove)} stale torrent(s).\n"
+        )
+        return 0
+
+    hashes = [h for h, _, _ in to_remove]
+    client.torrents_delete(delete_files=False, torrent_hashes=hashes)
+    log.info("Removed %d stale torrent(s) from %s", len(to_remove), child_name)
+    console.print(
+        f"  Removed [bold red]{len(to_remove)}[/] stale torrent(s).\n"
+    )
+    return len(to_remove)
+
+
+# ---------------------------------------------------------------------------
 # Main orchestrator
 # ---------------------------------------------------------------------------
 
 def run_sync(cfg: AppConfig, *, dry_run: bool, console: Console) -> None:
     """Execute a full sync cycle."""
     min_seed_secs = cfg.sync.min_seeding_time_minutes * 60
+
+    # --- pre-sync: clean stale torrents from children ---
+    console.print("\n[bold]Pre-sync cleanup[/]: scanning children for stale torrents …\n")
+    for child_cfg in cfg.children:
+        console.rule(f"[dim]{child_cfg.name}[/] — {child_cfg.host}")
+        try:
+            child_client = _connect(child_cfg)
+        except Exception:
+            log.error(
+                "Cannot connect to child %s at %s — skipping cleanup",
+                child_cfg.name,
+                child_cfg.host,
+            )
+            continue
+        _cleanup_stale_torrents(child_client, child_cfg.name, console, dry_run)
 
     # --- master ---
     console.print(f"\nConnecting to master [bold]{cfg.master.host}[/] …")
