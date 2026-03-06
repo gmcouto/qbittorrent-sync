@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 
@@ -29,6 +30,7 @@ class TorrentEntry:
     category: str
     content_path: str
     download_path: str = ""
+    tracker: str = ""
     file_priorities: list[int] | None = None
 
 
@@ -77,6 +79,39 @@ def _torrent_to_entry(t: qbittorrentapi.TorrentDictionary) -> TorrentEntry:
         category=t.get("category", ""),
         content_path=t.get("content_path", ""),
         download_path=t.get("download_path", ""),
+        tracker=t.get("tracker", ""),
+    )
+
+
+def _translate_path(path: str, master_prefix: str, child_prefix: str) -> str:
+    """Replace *master_prefix* at the start of *path* with *child_prefix*."""
+    if not master_prefix or not child_prefix or not path:
+        return path
+    norm_mp = master_prefix.rstrip("/")
+    norm_path = path.rstrip("/")
+    if norm_path == norm_mp or norm_path.startswith(norm_mp + "/"):
+        translated = child_prefix.rstrip("/") + norm_path[len(norm_mp):]
+        if path.endswith("/") and not translated.endswith("/"):
+            translated += "/"
+        return translated
+    return path
+
+
+def _translate_entry(
+    entry: TorrentEntry, master_prefix: str, child_prefix: str,
+) -> TorrentEntry:
+    """Return a copy of *entry* with paths translated from master to child space."""
+    if not master_prefix or not child_prefix:
+        return entry
+    return TorrentEntry(
+        hash=entry.hash,
+        name=entry.name,
+        save_path=_translate_path(entry.save_path, master_prefix, child_prefix),
+        category=entry.category,
+        content_path=_translate_path(entry.content_path, master_prefix, child_prefix),
+        download_path=_translate_path(entry.download_path, master_prefix, child_prefix) if entry.download_path else "",
+        tracker=entry.tracker,
+        file_priorities=entry.file_priorities,
     )
 
 
@@ -89,11 +124,31 @@ def _fetch_master_torrents(
     *,
     load_file_priorities: bool = True,
     treat_stopped_as_removed: bool = False,
+    private_only: bool = True,
+    tracker_include: list[re.Pattern[str]] | None = None,
+    tracker_exclude: list[re.Pattern[str]] | None = None,
 ) -> dict[str, TorrentEntry]:
     """Return eligible master torrents keyed by info-hash."""
     torrents = client.torrents_info()
+
+    if tracker_include or tracker_exclude:
+        before = len(torrents)
+        filtered: list = []
+        for t in torrents:
+            tracker = t.get("tracker", "")
+            if tracker_include and not any(p.search(tracker) for p in tracker_include):
+                log.debug("Master tracker filter (include miss): %s [%s]", t.get("name", t["hash"]), tracker)
+                continue
+            if tracker_exclude and any(p.search(tracker) for p in tracker_exclude):
+                log.debug("Master tracker filter (exclude hit): %s [%s]", t.get("name", t["hash"]), tracker)
+                continue
+            filtered.append(t)
+        torrents = filtered
+        log.info("Master tracker filter: %d/%d torrent(s) passed", len(torrents), before)
+
     result: dict[str, TorrentEntry] = {}
     stopped_count = 0
+    public_count = 0
     for t in torrents:
         state = (t.get("state") or "").lower()
 
@@ -102,12 +157,16 @@ def _fetch_master_torrents(
             log.debug("Treating stopped torrent as removed: %s", t.get("name", t["hash"]))
             continue
 
+        if private_only and not t.get("private", False):
+            public_count += 1
+            log.debug("Skipping public torrent: %s", t.get("name", t["hash"]))
+            continue
+
         is_completed = state in {
             "uploading", "stalledup", "forcedup",
             "pausedup", "queuedup", "checkingup",
             "seeding", "completed",
         }
-        # Also accept explicit progress == 1.0 as completed
         if not is_completed and t.get("progress", 0) < 1.0:
             continue
 
@@ -125,6 +184,9 @@ def _fetch_master_torrents(
 
     if treat_stopped_as_removed and stopped_count:
         log.info("Excluded %d stopped/paused torrent(s) from master (treated as removed)", stopped_count)
+
+    if private_only and public_count:
+        log.info("Excluded %d public torrent(s) from master", public_count)
 
     if load_file_priorities:
         for h, entry in result.items():
@@ -528,6 +590,46 @@ def _cleanup_stale_torrents(
 
 
 # ---------------------------------------------------------------------------
+# Per-child tracker filtering
+# ---------------------------------------------------------------------------
+
+def _filter_by_tracker(
+    master: dict[str, TorrentEntry],
+    include: list[re.Pattern[str]],
+    exclude: list[re.Pattern[str]],
+) -> dict[str, TorrentEntry]:
+    """Return the subset of *master* whose tracker URL matches the child's rules.
+
+    - *include*: if non-empty, the tracker must match at least one pattern.
+    - *exclude*: if non-empty, the tracker must NOT match any pattern.
+    Include is checked first; exclude is applied on the surviving set.
+    """
+    if not include and not exclude:
+        return master
+
+    filtered: dict[str, TorrentEntry] = {}
+    skipped = 0
+    for h, entry in master.items():
+        tracker = entry.tracker
+
+        if include and not any(p.search(tracker) for p in include):
+            skipped += 1
+            log.debug("Tracker filter (include miss): %s [%s]", entry.name, tracker)
+            continue
+
+        if exclude and any(p.search(tracker) for p in exclude):
+            skipped += 1
+            log.debug("Tracker filter (exclude hit): %s [%s]", entry.name, tracker)
+            continue
+
+        filtered[h] = entry
+
+    if skipped:
+        log.info("Tracker filter excluded %d torrent(s) for this child", skipped)
+    return filtered
+
+
+# ---------------------------------------------------------------------------
 # Main orchestrator
 # ---------------------------------------------------------------------------
 
@@ -560,12 +662,20 @@ def run_sync(cfg: AppConfig, *, dry_run: bool, console: Console) -> None:
 
     sync_files = cfg.sync.sync_file_selections
     treat_stopped = cfg.sync.treat_stopped_as_removed
+    private_only = cfg.sync.private_only
     master_torrents = _fetch_master_torrents(
         master_client, min_seed_secs,
         load_file_priorities=sync_files,
         treat_stopped_as_removed=treat_stopped,
+        private_only=private_only,
+        tracker_include=cfg.master.tracker_include or None,
+        tracker_exclude=cfg.master.tracker_exclude or None,
     )
     console.print(f"  Found [bold]{len(master_torrents)}[/] eligible torrent(s) on master.")
+    if cfg.master.tracker_include or cfg.master.tracker_exclude:
+        console.print("  [dim]Master tracker filter is active.[/]")
+    if private_only:
+        console.print("  [dim]Only private torrents are being synced (private_only is enabled).[/]")
     if treat_stopped:
         console.print("  [dim]Stopped/paused torrents on master are treated as removed.[/]")
     if not sync_files:
@@ -584,7 +694,27 @@ def run_sync(cfg: AppConfig, *, dry_run: bool, console: Console) -> None:
         child_torrents = _fetch_child_torrents(child_client)
         log.debug("Child %s has %d torrent(s)", child_cfg.name, len(child_torrents))
 
-        diff = compute_diff(master_torrents, child_torrents, child_cfg.name)
+        master_path = cfg.master.path
+        child_path = child_cfg.path
+        if master_path and child_path:
+            translated_master = {
+                h: _translate_entry(e, master_path, child_path)
+                for h, e in master_torrents.items()
+            }
+            console.print(f"  [dim]Path translation: {master_path} → {child_path}[/]")
+        else:
+            translated_master = master_torrents
+
+        if child_cfg.tracker_include or child_cfg.tracker_exclude:
+            before = len(translated_master)
+            translated_master = _filter_by_tracker(
+                translated_master, child_cfg.tracker_include, child_cfg.tracker_exclude,
+            )
+            console.print(
+                f"  [dim]Tracker filter: {len(translated_master)}/{before} torrent(s) matched[/]"
+            )
+
+        diff = compute_diff(translated_master, child_torrents, child_cfg.name)
         if sync_files:
             diff.to_sync_files = _filter_needed_file_syncs(child_client, diff.to_sync_files)
         _print_diff_table(diff, console, dry_run)

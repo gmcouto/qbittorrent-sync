@@ -5,12 +5,44 @@ master:
   host: "http://192.168.1.10:8080"
   username: admin
   password: adminadmin
+  # Optional base path for torrent data on the master instance.
+  # Used together with a child's "path" to translate torrent paths.
+  # path: "/media/torrent"
+
+  # Optional tracker filters (regex, matched against the tracker URL).
+  # Applied right after the bulk torrent load, before any processing.
+  # Torrents excluded here are invisible to all children.
+  # tracker_include:
+  #   - "tracker\\.allowed\\.com"
+  # tracker_exclude:
+  #   - "tracker\\.ignored\\.com"
 
 children:
   - name: child1
     host: "http://192.168.1.11:8080"
     username: admin
     password: adminadmin
+    # Optional base path for torrent data on this child.
+    # When both master.path and child.path are set, torrent paths are
+    # translated: the master prefix is replaced with this child prefix.
+    # Example: master path /media/torrent + child path /mnt/data/torrent
+    #   /media/torrent/downloads/movie.mkv → /mnt/data/torrent/downloads/movie.mkv
+    # path: "/mnt/data/torrent"
+
+    # Optional tracker filters (regex, matched against the tracker URL from
+    # the master torrent list). Both are lists of patterns.
+    #
+    # tracker_include: only sync torrents whose tracker matches at least one
+    # pattern. If omitted/empty, all trackers are included.
+    #
+    # tracker_exclude: skip torrents whose tracker matches any pattern.
+    # Applied after include.
+    #
+    # Examples:
+    # tracker_include:
+    #   - "tracker\\.mysite\\.com"
+    # tracker_exclude:
+    #   - "tracker\\.public\\.example\\.com"
 
   # Add more children as needed:
   # - name: child2
@@ -25,6 +57,12 @@ sync:
   # Skip hash verification when adding torrents to children.
   # Safe when children mount the same storage as master.
   skip_hash_check: true
+
+  # Only sync torrents that belong to private trackers.
+  # When enabled, public torrents on master are completely ignored as if they
+  # don't exist. Uses the isPrivate field from the bulk torrent list, so
+  # there is no performance overhead. Requires qBittorrent 5.0+.
+  private_only: true
 
   # Sync deselected files from master to existing child torrents.
   # When disabled, file selections are still applied to newly added torrents,

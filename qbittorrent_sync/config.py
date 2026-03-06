@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -16,6 +17,9 @@ class InstanceConfig:
     username: str
     password: str
     name: str = ""
+    path: str = ""
+    tracker_include: list[re.Pattern[str]] = field(default_factory=list)
+    tracker_exclude: list[re.Pattern[str]] = field(default_factory=list)
 
 
 @dataclass
@@ -25,6 +29,7 @@ class SyncConfig:
     min_seeding_time_minutes: int = 10
     skip_hash_check: bool = True
     dry_run: bool = True
+    private_only: bool = True
     sync_file_selections: bool = False
     treat_stopped_as_removed: bool = False
     daemon_run_interval_minutes: int = 15
@@ -43,15 +48,33 @@ class ConfigError(Exception):
     """Raised when configuration is invalid or missing."""
 
 
+def _compile_patterns(raw: list | None, field_name: str, instance_name: str) -> list[re.Pattern[str]]:
+    if not raw:
+        return []
+    patterns: list[re.Pattern[str]] = []
+    for item in raw:
+        try:
+            patterns.append(re.compile(item))
+        except re.error as exc:
+            raise ConfigError(
+                f"Invalid regex in {field_name} for {instance_name}: {item!r} ({exc})"
+            )
+    return patterns
+
+
 def _parse_instance(data: dict, default_name: str = "") -> InstanceConfig:
     missing = [k for k in ("host", "username", "password") if k not in data]
     if missing:
         raise ConfigError(f"Instance config missing required fields: {', '.join(missing)}")
+    name = data.get("name", default_name)
     return InstanceConfig(
         host=data["host"],
         username=data["username"],
         password=data["password"],
-        name=data.get("name", default_name),
+        name=name,
+        path=data.get("path", ""),
+        tracker_include=_compile_patterns(data.get("tracker_include"), "tracker_include", name),
+        tracker_exclude=_compile_patterns(data.get("tracker_exclude"), "tracker_exclude", name),
     )
 
 
@@ -83,6 +106,7 @@ def load_config(path: str | Path) -> AppConfig:
         min_seeding_time_minutes=int(sync_raw.get("min_seeding_time_minutes", 10)),
         skip_hash_check=bool(sync_raw.get("skip_hash_check", True)),
         dry_run=bool(sync_raw.get("dry_run", True)),
+        private_only=bool(sync_raw.get("private_only", True)),
         sync_file_selections=bool(sync_raw.get("sync_file_selections", False)),
         treat_stopped_as_removed=bool(sync_raw.get("treat_stopped_as_removed", False)),
         daemon_run_interval_minutes=int(sync_raw.get("daemon_run_interval_minutes", 15)),
