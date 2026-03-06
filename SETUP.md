@@ -19,6 +19,9 @@ See `config.example.yaml` for all available options.
 ## Usage
 
 ```bash
+# run directly
+python -m qbittorrent_sync
+
 # Preview changes (dry run, the default)
 qbt-sync
 
