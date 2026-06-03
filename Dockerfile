@@ -7,4 +7,4 @@ COPY qbittorrent_sync/ qbittorrent_sync/
 
 RUN pip install --no-cache-dir .
 
-CMD ["qbt-sync", "--daemon", "--verbose"]
+CMD ["qbt-sync", "--daemon"]
